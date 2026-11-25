@@ -25,7 +25,7 @@ jobs:
           flutter create --org com.toko --project-name struk_app --platforms android tmp_app
           cp lib/main.dart tmp_app/lib/main.dart
           cd tmp_app
-          flutter pub add print_bluetooth_thermal esc_pos_utils_plus permission_handler image image_picker share_plus path_provider shared_preferences
+          flutter pub add print_bluetooth_thermal esc_pos_utils_plus permission_handler:^11.3.1 image image_picker share_plus path_provider shared_preferences
           sed -i 's|<application|<uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />\n    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />\n    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />\n    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <application|' android/app/src/main/AndroidManifest.xml
           flutter build apk --release
 
