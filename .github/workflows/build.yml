@@ -27,6 +27,63 @@ jobs:
           cd tmp_app
           flutter pub add print_bluetooth_thermal esc_pos_utils_plus permission_handler:^11.3.1 image image_picker share_plus path_provider shared_preferences
           sed -i 's|<application|<uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />\n    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />\n    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />\n    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <application|' android/app/src/main/AndroidManifest.xml
+          sed -i 's|</activity>|<intent-filter>\n                <action android:name="android.intent.action.SEND" />\n                <category android:name="android.intent.category.DEFAULT" />\n                <data android:mimeType="image/*" />\n            </intent-filter>\n        </activity>|' android/app/src/main/AndroidManifest.xml
+          MAIN=$(find android/app/src/main -name 'MainActivity.kt' | head -n 1)
+          PKG=$(grep -m1 '^package ' "$MAIN")
+          {
+            echo "$PKG"
+            cat <<'KOTLIN'
+
+          import android.content.Intent
+          import android.net.Uri
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+          import java.io.File
+
+          class MainActivity : FlutterActivity() {
+              private var channel: MethodChannel? = null
+              private var pendingPath: String? = null
+
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "struk/share")
+                  channel!!.setMethodCallHandler { call, result ->
+                      if (call.method == "getInitialShare") {
+                          result.success(pendingPath)
+                          pendingPath = null
+                      } else {
+                          result.notImplemented()
+                      }
+                  }
+                  handleShare(intent, false)
+              }
+
+              override fun onNewIntent(intent: Intent) {
+                  super.onNewIntent(intent)
+                  setIntent(intent)
+                  handleShare(intent, true)
+              }
+
+              private fun handleShare(intent: Intent?, live: Boolean) {
+                  if (intent == null || intent.action != Intent.ACTION_SEND) return
+                  val type = intent.type ?: return
+                  if (!type.startsWith("image/")) return
+                  @Suppress("DEPRECATION")
+                  val uri: Uri = (intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)) ?: return
+                  val out = File(cacheDir, "shared_" + System.currentTimeMillis() + ".png")
+                  contentResolver.openInputStream(uri)?.use { input ->
+                      out.outputStream().use { input.copyTo(it) }
+                  }
+                  if (live) {
+                      channel?.invokeMethod("onShare", out.absolutePath)
+                  } else {
+                      pendingPath = out.absolutePath
+                  }
+              }
+          }
+          KOTLIN
+          } > "$MAIN"
           flutter build apk --release
 
       - uses: actions/upload-artifact@v4
