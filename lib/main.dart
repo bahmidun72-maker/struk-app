@@ -2,11 +2,9 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
-import 'package:esc_pos_utils_plus/esc_pos_utils_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
-import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -67,6 +65,8 @@ class _HalamanStrukState extends State<HalamanStruk> {
   BluetoothInfo? terpilih;
   bool terhubung = false;
   bool lebar80mm = false;
+  int tambahMm = 7; // tambahan lebar cetak (mm)
+  int ruangBawah = 1; // jumlah baris kosong di bawah struk
 
   final GlobalKey strukKey = GlobalKey();
   final GlobalKey kompKey = GlobalKey();
@@ -94,6 +94,8 @@ class _HalamanStrukState extends State<HalamanStruk> {
       final path = p.getString('logo');
       if (path != null && File(path).existsSync()) logoPath = path;
       lebar80mm = p.getBool('lebar80') ?? false;
+      tambahMm = p.getInt('tambahMm') ?? 7;
+      ruangBawah = p.getInt('ruangBawah') ?? 1;
     });
   }
 
@@ -103,6 +105,8 @@ class _HalamanStrukState extends State<HalamanStruk> {
     await p.setString('alamat', alamatCtrl.text);
     await p.setString('footer', footerCtrl.text);
     await p.setBool('lebar80', lebar80mm);
+    await p.setInt('tambahMm', tambahMm);
+    await p.setInt('ruangBawah', ruangBawah);
     if (logoPath != null) {
       await p.setString('logo', logoPath!);
     } else {
@@ -239,28 +243,83 @@ class _HalamanStrukState extends State<HalamanStruk> {
       pesan('Belum ada item');
       return;
     }
-    // Struk dicetak persis seperti gambarnya (logo ikut tercetak).
-    final bytes = await tangkapStruk(pixelRatio: 2);
-    await cetakGambar(bytes);
+    await cetakKey(strukKey);
   }
 
-  Future<void> cetakGambar(Uint8List bytes) async {
+  // Cetak widget (struk / gambar dari aplikasi lain) langsung sebagai
+  // gambar hitam-putih murni supaya teks pekat dan jelas.
+  Future<void> cetakKey(GlobalKey key) async {
     if (!await pastikanTerhubung()) return;
-    final decoded = img.decodeImage(bytes);
-    if (decoded == null) {
+    final dasar = lebar80mm ? 576 : 384; // titik cetak (8 titik = 1 mm)
+    final lebar = (((dasar + tambahMm * 8) / 8).round()) * 8;
+    final boundary =
+        key.currentContext!.findRenderObject() as RenderRepaintBoundary;
+    final pr = lebar / boundary.size.width;
+    final image = await boundary.toImage(pixelRatio: pr);
+    final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+    if (data == null) {
       pesan('Gagal membuat gambar struk');
       return;
     }
-    final lebar = lebar80mm ? 576 : 384;
-    final kecil = img.copyResize(decoded, width: lebar);
-    final profile = await CapabilityProfile.load();
-    final gen = Generator(lebar80mm ? PaperSize.mm80 : PaperSize.mm58, profile);
-    List<int> b = [];
-    b += gen.imageRaster(kecil);
-    b += gen.feed(3);
-    b += gen.cut();
-    final ok = await PrintBluetoothThermal.writeBytes(b);
+    final rgba = data.buffer.asUint8List();
+    final w = image.width;
+    final h = image.height;
+    final bytesPerRow = lebar ~/ 8;
+    const int ambang = 200; // makin besar angkanya, makin hitam hasil cetak
+    bool ok = await PrintBluetoothThermal.writeBytes([0x1B, 0x40]);
+    for (int y0 = 0; y0 < h; y0 += 200) {
+      final y1 = (y0 + 200 < h) ? y0 + 200 : h;
+      final rows = y1 - y0;
+      final blok = Uint8List(8 + bytesPerRow * rows);
+      blok[0] = 0x1D;
+      blok[1] = 0x76;
+      blok[2] = 0x30;
+      blok[3] = 0x00;
+      blok[4] = bytesPerRow & 0xFF;
+      blok[5] = (bytesPerRow >> 8) & 0xFF;
+      blok[6] = rows & 0xFF;
+      blok[7] = (rows >> 8) & 0xFF;
+      int o = 8;
+      for (int y = y0; y < y1; y++) {
+        for (int bx = 0; bx < bytesPerRow; bx++) {
+          int byte = 0;
+          for (int bit = 0; bit < 8; bit++) {
+            final x = bx * 8 + bit;
+            int hitam = 0;
+            if (x < w) {
+              final i = (y * w + x) * 4;
+              final a = rgba[i + 3];
+              double lum =
+                  0.299 * rgba[i] + 0.587 * rgba[i + 1] + 0.114 * rgba[i + 2];
+              if (a < 255) lum = lum * a / 255 + 255 * (255 - a) / 255;
+              if (lum < ambang) hitam = 1;
+            }
+            byte = (byte << 1) | hitam;
+          }
+          blok[o++] = byte;
+        }
+      }
+      ok = await PrintBluetoothThermal.writeBytes(blok) && ok;
+      await Future.delayed(const Duration(milliseconds: 40));
+    }
+    if (ruangBawah > 0) {
+      ok = await PrintBluetoothThermal.writeBytes([0x1B, 0x64, ruangBawah]) && ok;
+    }
     pesan(ok ? 'Struk dicetak' : 'Gagal mencetak');
+  }
+
+  Widget stepper(String label, int nilai, int min, int max, ValueChanged<int> onChanged) {
+    return Row(children: [
+      Expanded(child: Text('$label: $nilai')),
+      IconButton(
+        onPressed: nilai > min ? () => onChanged(nilai - 1) : null,
+        icon: const Icon(Icons.remove_circle_outline),
+      ),
+      IconButton(
+        onPressed: nilai < max ? () => onChanged(nilai + 1) : null,
+        icon: const Icon(Icons.add_circle_outline),
+      ),
+    ]);
   }
 
   // ---- Sambung otomatis ke printer terakhir ----
@@ -311,7 +370,7 @@ class _HalamanStrukState extends State<HalamanStruk> {
       child: Container(
         width: 340,
         color: Colors.white,
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.fromLTRB(6, 10, 6, 6),
         child: DefaultTextStyle(
           style: const TextStyle(color: Color(0xFF222222), fontSize: 13),
           child: Column(
@@ -347,7 +406,8 @@ class _HalamanStrukState extends State<HalamanStruk> {
                 const _GarisPutus(),
                 const SizedBox(height: 10),
               ],
-              Image.file(File(path), fit: BoxFit.fitWidth),
+              Image.file(File(path),
+                  fit: BoxFit.fitWidth, filterQuality: FilterQuality.high),
             ],
           ),
         ),
@@ -388,8 +448,7 @@ class _HalamanStrukState extends State<HalamanStruk> {
                 const SizedBox(height: 12),
                 FilledButton.icon(
                   onPressed: () async {
-                    final bytes = await tangkap(kompKey, pixelRatio: 2);
-                    await cetakGambar(bytes);
+                    await cetakKey(kompKey);
                   },
                   icon: const Icon(Icons.print),
                   label: const Text('Cetak'),
@@ -432,7 +491,7 @@ class _HalamanStrukState extends State<HalamanStruk> {
       child: Container(
         width: 340,
         color: Colors.white,
-        padding: const EdgeInsets.fromLTRB(22, 26, 22, 26),
+        padding: const EdgeInsets.fromLTRB(22, 20, 22, 12),
         child: DefaultTextStyle(
           style: const TextStyle(color: Color(0xFF222222), fontSize: 13),
           child: Column(
@@ -701,6 +760,21 @@ class _HalamanStrukState extends State<HalamanStruk> {
                   },
                 ),
               ]),
+              stepper('Tambah lebar cetak (mm)', tambahMm, 0, 20, (v) {
+                setState(() => tambahMm = v);
+                _simpanPengaturan();
+              }),
+              stepper('Ruang kosong di bawah (baris)', ruangBawah, 0, 6, (v) {
+                setState(() => ruangBawah = v);
+                _simpanPengaturan();
+              }),
+              const Padding(
+                padding: EdgeInsets.only(bottom: 8),
+                child: Text(
+                  'Kalau sisi kanan struk terpotong atau berantakan, kurangi tambah lebar.',
+                  style: TextStyle(fontSize: 12, color: Colors.black54),
+                ),
+              ),
               Align(
                 alignment: Alignment.centerLeft,
                 child: FilledButton.icon(
