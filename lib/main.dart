@@ -2,9 +2,11 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:esc_pos_utils_plus/esc_pos_utils_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
+import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -246,65 +248,50 @@ class _HalamanStrukState extends State<HalamanStruk> {
     await cetakKey(strukKey);
   }
 
-  // Cetak widget (struk / gambar dari aplikasi lain) langsung sebagai
-  // gambar hitam-putih murni supaya teks pekat dan jelas.
+  // Cetak widget (struk / gambar dari aplikasi lain) sebagai gambar
+  // hitam-putih pekat, memakai cara kirim yang sudah terbukti jalan.
   Future<void> cetakKey(GlobalKey key) async {
     if (!await pastikanTerhubung()) return;
     final dasar = lebar80mm ? 576 : 384; // titik cetak (8 titik = 1 mm)
     final lebar = (((dasar + tambahMm * 8) / 8).round()) * 8;
     final boundary =
         key.currentContext!.findRenderObject() as RenderRepaintBoundary;
-    final pr = lebar / boundary.size.width;
-    final image = await boundary.toImage(pixelRatio: pr);
-    final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
-    if (data == null) {
+    final asli =
+        await boundary.toImage(pixelRatio: lebar / boundary.size.width);
+
+    // Pekatkan teks: ubah jadi hitam-putih dengan ambang tinggi (~200 dari 255)
+    const double k = 20.0;
+    const double o = 127.5 - k * 200;
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    canvas.drawImage(
+      asli,
+      Offset.zero,
+      Paint()
+        ..colorFilter = const ColorFilter.matrix(<double>[
+          0.299 * k, 0.587 * k, 0.114 * k, 0, o,
+          0.299 * k, 0.587 * k, 0.114 * k, 0, o,
+          0.299 * k, 0.587 * k, 0.114 * k, 0, o,
+          0, 0, 0, 1, 0,
+        ]),
+    );
+    final hitamPutih =
+        await recorder.endRecording().toImage(asli.width, asli.height);
+    final data = await hitamPutih.toByteData(format: ui.ImageByteFormat.png);
+    final decoded =
+        data == null ? null : img.decodeImage(data.buffer.asUint8List());
+    if (decoded == null) {
       pesan('Gagal membuat gambar struk');
       return;
     }
-    final rgba = data.buffer.asUint8List();
-    final w = image.width;
-    final h = image.height;
-    final bytesPerRow = lebar ~/ 8;
-    const int ambang = 200; // makin besar angkanya, makin hitam hasil cetak
-    bool ok = await PrintBluetoothThermal.writeBytes([0x1B, 0x40]);
-    for (int y0 = 0; y0 < h; y0 += 200) {
-      final y1 = (y0 + 200 < h) ? y0 + 200 : h;
-      final rows = y1 - y0;
-      final blok = Uint8List(8 + bytesPerRow * rows);
-      blok[0] = 0x1D;
-      blok[1] = 0x76;
-      blok[2] = 0x30;
-      blok[3] = 0x00;
-      blok[4] = bytesPerRow & 0xFF;
-      blok[5] = (bytesPerRow >> 8) & 0xFF;
-      blok[6] = rows & 0xFF;
-      blok[7] = (rows >> 8) & 0xFF;
-      int o = 8;
-      for (int y = y0; y < y1; y++) {
-        for (int bx = 0; bx < bytesPerRow; bx++) {
-          int byte = 0;
-          for (int bit = 0; bit < 8; bit++) {
-            final x = bx * 8 + bit;
-            int hitam = 0;
-            if (x < w) {
-              final i = (y * w + x) * 4;
-              final a = rgba[i + 3];
-              double lum =
-                  0.299 * rgba[i] + 0.587 * rgba[i + 1] + 0.114 * rgba[i + 2];
-              if (a < 255) lum = lum * a / 255 + 255 * (255 - a) / 255;
-              if (lum < ambang) hitam = 1;
-            }
-            byte = (byte << 1) | hitam;
-          }
-          blok[o++] = byte;
-        }
-      }
-      ok = await PrintBluetoothThermal.writeBytes(blok) && ok;
-      await Future.delayed(const Duration(milliseconds: 40));
-    }
-    if (ruangBawah > 0) {
-      ok = await PrintBluetoothThermal.writeBytes([0x1B, 0x64, ruangBawah]) && ok;
-    }
+    final kecil =
+        decoded.width == lebar ? decoded : img.copyResize(decoded, width: lebar);
+    final profile = await CapabilityProfile.load();
+    final gen = Generator(lebar80mm ? PaperSize.mm80 : PaperSize.mm58, profile);
+    List<int> b = [];
+    b += gen.imageRaster(kecil);
+    if (ruangBawah > 0) b += gen.feed(ruangBawah);
+    final ok = await PrintBluetoothThermal.writeBytes(b);
     pesan(ok ? 'Struk dicetak' : 'Gagal mencetak');
   }
 
