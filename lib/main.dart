@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 import 'package:esc_pos_utils_plus/esc_pos_utils_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
@@ -68,6 +69,8 @@ class _HalamanStrukState extends State<HalamanStruk> {
   bool lebar80mm = false;
 
   final GlobalKey strukKey = GlobalKey();
+  final GlobalKey kompKey = GlobalKey();
+  static const MethodChannel _kanal = MethodChannel('struk/share');
 
   static String _buatNoTrx() {
     final n = DateTime.now();
@@ -79,7 +82,7 @@ class _HalamanStrukState extends State<HalamanStruk> {
   @override
   void initState() {
     super.initState();
-    _muatPengaturan();
+    _muatPengaturan().then((_) => _mulaiTerimaShare());
   }
 
   Future<void> _muatPengaturan() async {
@@ -172,9 +175,12 @@ class _HalamanStrukState extends State<HalamanStruk> {
   }
 
   // ---- Tangkap struk jadi gambar PNG ----
-  Future<Uint8List> tangkapStruk({double pixelRatio = 3}) async {
+  Future<Uint8List> tangkapStruk({double pixelRatio = 3}) =>
+      tangkap(strukKey, pixelRatio: pixelRatio);
+
+  Future<Uint8List> tangkap(GlobalKey key, {double pixelRatio = 3}) async {
     final boundary =
-        strukKey.currentContext!.findRenderObject() as RenderRepaintBoundary;
+        key.currentContext!.findRenderObject() as RenderRepaintBoundary;
     final image = await boundary.toImage(pixelRatio: pixelRatio);
     final data = await image.toByteData(format: ui.ImageByteFormat.png);
     return data!.buffer.asUint8List();
@@ -221,6 +227,10 @@ class _HalamanStrukState extends State<HalamanStruk> {
     final ok = await PrintBluetoothThermal.connect(
         macPrinterAddress: terpilih!.macAdress);
     setState(() => terhubung = ok);
+    if (ok) {
+      final p = await SharedPreferences.getInstance();
+      await p.setString('printerMac', terpilih!.macAdress);
+    }
     pesan(ok ? 'Terhubung ke ${terpilih!.name}' : 'Gagal terhubung');
   }
 
@@ -229,13 +239,13 @@ class _HalamanStrukState extends State<HalamanStruk> {
       pesan('Belum ada item');
       return;
     }
-    if (!await PrintBluetoothThermal.connectionStatus) {
-      setState(() => terhubung = false);
-      pesan('Printer belum terhubung');
-      return;
-    }
     // Struk dicetak persis seperti gambarnya (logo ikut tercetak).
     final bytes = await tangkapStruk(pixelRatio: 2);
+    await cetakGambar(bytes);
+  }
+
+  Future<void> cetakGambar(Uint8List bytes) async {
+    if (!await pastikanTerhubung()) return;
     final decoded = img.decodeImage(bytes);
     if (decoded == null) {
       pesan('Gagal membuat gambar struk');
@@ -251,6 +261,149 @@ class _HalamanStrukState extends State<HalamanStruk> {
     b += gen.cut();
     final ok = await PrintBluetoothThermal.writeBytes(b);
     pesan(ok ? 'Struk dicetak' : 'Gagal mencetak');
+  }
+
+  // ---- Sambung otomatis ke printer terakhir ----
+  Future<bool> pastikanTerhubung() async {
+    if (await PrintBluetoothThermal.connectionStatus) {
+      setState(() => terhubung = true);
+      return true;
+    }
+    final p = await SharedPreferences.getInstance();
+    final mac = terpilih?.macAdress ?? p.getString('printerMac');
+    if (mac == null) {
+      pesan('Pilih dan sambungkan printer dulu di menu "Cetak ke printer Bluetooth"');
+      return false;
+    }
+    await [Permission.bluetoothConnect, Permission.bluetoothScan].request();
+    final ok = await PrintBluetoothThermal.connect(macPrinterAddress: mac);
+    setState(() => terhubung = ok);
+    if (!ok) pesan('Gagal terhubung ke printer. Pastikan printer menyala.');
+    return ok;
+  }
+
+  // ---- Terima gambar dari aplikasi lain (DANA, OVO, GoPay, bank, dll) ----
+  void _mulaiTerimaShare() {
+    _kanal.setMethodCallHandler((call) async {
+      if (call.method == 'onShare') {
+        _terimaGambar(call.arguments as String);
+      }
+    });
+    _kanal.invokeMethod<String>('getInitialShare').then((p) {
+      if (p != null) _terimaGambar(p);
+    }).catchError((_) {});
+  }
+
+  void _terimaGambar(String path) {
+    if (!mounted) return;
+    _tampilkanSheet(path);
+  }
+
+  Future<void> pilihGambarDariGaleri() async {
+    final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
+    if (picked == null) return;
+    _terimaGambar(picked.path);
+  }
+
+  Widget kompWidget(String path, bool header) {
+    return RepaintBoundary(
+      key: kompKey,
+      child: Container(
+        width: 340,
+        color: Colors.white,
+        padding: const EdgeInsets.all(12),
+        child: DefaultTextStyle(
+          style: const TextStyle(color: Color(0xFF222222), fontSize: 13),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (header) ...[
+                if (logoPath != null)
+                  Center(
+                    child: Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: Image.file(File(logoPath!),
+                            width: 72, height: 72, fit: BoxFit.cover),
+                      ),
+                    ),
+                  ),
+                Text(
+                  tokoCtrl.text,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+                ),
+                if (alamatCtrl.text.trim().isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(alamatCtrl.text,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                            fontSize: 12, color: Color(0xFF666666))),
+                  ),
+                const SizedBox(height: 10),
+                const _GarisPutus(),
+                const SizedBox(height: 10),
+              ],
+              Image.file(File(path), fit: BoxFit.fitWidth),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _tampilkanSheet(String path) async {
+    bool pakaiHeader = true;
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) => SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text('Struk dari aplikasi lain',
+                    style: Theme.of(ctx).textTheme.titleMedium),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Tambahkan logo & nama toko di atas'),
+                  value: pakaiHeader,
+                  onChanged: (v) => setSheet(() => pakaiHeader = v),
+                ),
+                Center(
+                  child: Container(
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.black12),
+                    ),
+                    child: kompWidget(path, pakaiHeader),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                FilledButton.icon(
+                  onPressed: () async {
+                    final bytes = await tangkap(kompKey, pixelRatio: 2);
+                    await cetakGambar(bytes);
+                  },
+                  icon: const Icon(Icons.print),
+                  label: const Text('Cetak'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Tutup'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   // ---- Tampilan struk (inilah yang dibagikan/dicetak) ----
@@ -505,6 +658,12 @@ class _HalamanStrukState extends State<HalamanStruk> {
             onPressed: bagikan,
             icon: const Icon(Icons.share),
             label: const Text('Bagikan struk (gambar)'),
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: pilihGambarDariGaleri,
+            icon: const Icon(Icons.photo_library_outlined),
+            label: const Text('Cetak gambar struk dari galeri'),
           ),
           const SizedBox(height: 24),
           ExpansionTile(
