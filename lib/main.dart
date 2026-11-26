@@ -69,6 +69,7 @@ class _HalamanStrukState extends State<HalamanStruk> {
   bool lebar80mm = false;
   int tambahMm = 7; // tambahan lebar cetak (mm)
   int ruangBawah = 1; // jumlah baris kosong di bawah struk
+  double logoUkuran = 110; // lebar logo di struk
 
   final GlobalKey strukKey = GlobalKey();
   final GlobalKey kompKey = GlobalKey();
@@ -98,6 +99,7 @@ class _HalamanStrukState extends State<HalamanStruk> {
       lebar80mm = p.getBool('lebar80') ?? false;
       tambahMm = p.getInt('tambahMm') ?? 7;
       ruangBawah = p.getInt('ruangBawah') ?? 1;
+      logoUkuran = p.getDouble('logoUkuran') ?? 110;
     });
   }
 
@@ -109,6 +111,7 @@ class _HalamanStrukState extends State<HalamanStruk> {
     await p.setBool('lebar80', lebar80mm);
     await p.setInt('tambahMm', tambahMm);
     await p.setInt('ruangBawah', ruangBawah);
+    await p.setDouble('logoUkuran', logoUkuran);
     if (logoPath != null) {
       await p.setString('logo', logoPath!);
     } else {
@@ -254,6 +257,8 @@ class _HalamanStrukState extends State<HalamanStruk> {
     if (!await pastikanTerhubung()) return;
     final dasar = lebar80mm ? 576 : 384; // titik cetak (8 titik = 1 mm)
     final lebar = (((dasar + tambahMm * 8) / 8).round()) * 8;
+    // Kelebihan lebar dipangkas sama banyak di kiri dan kanan
+    final potong = ((lebar - dasar) / 2).round();
     final boundary =
         key.currentContext!.findRenderObject() as RenderRepaintBoundary;
     final asli =
@@ -266,7 +271,7 @@ class _HalamanStrukState extends State<HalamanStruk> {
     final canvas = Canvas(recorder);
     canvas.drawImage(
       asli,
-      Offset.zero,
+      Offset(-potong.toDouble(), 0),
       Paint()
         ..colorFilter = const ColorFilter.matrix(<double>[
           0.299 * k, 0.587 * k, 0.114 * k, 0, o,
@@ -276,7 +281,7 @@ class _HalamanStrukState extends State<HalamanStruk> {
         ]),
     );
     final hitamPutih =
-        await recorder.endRecording().toImage(asli.width, asli.height);
+        await recorder.endRecording().toImage(dasar, asli.height);
     final data = await hitamPutih.toByteData(format: ui.ImageByteFormat.png);
     final decoded =
         data == null ? null : img.decodeImage(data.buffer.asUint8List());
@@ -285,7 +290,7 @@ class _HalamanStrukState extends State<HalamanStruk> {
       return;
     }
     final kecil =
-        decoded.width == lebar ? decoded : img.copyResize(decoded, width: lebar);
+        decoded.width == dasar ? decoded : img.copyResize(decoded, width: dasar);
     final profile = await CapabilityProfile.load();
     final gen = Generator(lebar80mm ? PaperSize.mm80 : PaperSize.mm58, profile);
     List<int> b = [];
@@ -372,7 +377,7 @@ class _HalamanStrukState extends State<HalamanStruk> {
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(12),
                         child: Image.file(File(logoPath!),
-                            width: 72, height: 72, fit: BoxFit.cover),
+                            width: logoUkuran, fit: BoxFit.contain),
                       ),
                     ),
                   ),
@@ -491,7 +496,7 @@ class _HalamanStrukState extends State<HalamanStruk> {
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(14),
                       child: Image.file(File(logoPath!),
-                          width: 84, height: 84, fit: BoxFit.cover),
+                          width: logoUkuran, fit: BoxFit.contain),
                     ),
                   ),
                 ),
@@ -590,6 +595,20 @@ class _HalamanStrukState extends State<HalamanStruk> {
                 const SizedBox(width: 8),
                 if (logoPath != null)
                   TextButton(onPressed: hapusLogo, child: const Text('Hapus logo')),
+              ]),
+              Row(children: [
+                const Text('Ukuran logo'),
+                Expanded(
+                  child: Slider(
+                    value: logoUkuran,
+                    min: 40,
+                    max: 290,
+                    divisions: 25,
+                    label: '${logoUkuran.round()}',
+                    onChanged: (v) => setState(() => logoUkuran = v),
+                    onChangeEnd: (_) => _simpanPengaturan(),
+                  ),
+                ),
               ]),
               TextField(
                 controller: tokoCtrl,
@@ -758,7 +777,7 @@ class _HalamanStrukState extends State<HalamanStruk> {
               const Padding(
                 padding: EdgeInsets.only(bottom: 8),
                 child: Text(
-                  'Kalau sisi kanan struk terpotong atau berantakan, kurangi tambah lebar.',
+                  'Isi struk dilebarkan, lalu kelebihannya dipangkas sama banyak di kiri dan kanan. Kalau tepi struk terpotong, kurangi angkanya.',
                   style: TextStyle(fontSize: 12, color: Colors.black54),
                 ),
               ),
